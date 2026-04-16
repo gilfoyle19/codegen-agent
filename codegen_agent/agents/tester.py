@@ -25,23 +25,26 @@ Rules:
 - Cover: happy path, edge cases, invalid inputs, boundary values.
 - Each test method must have a clear descriptive name.
 - Do NOT mock the implementation — test the real code.
+- Do NOT include any sys.path manipulation — it is already handled externally.
+- Do NOT import or modify sys in any way.
+- Do NOT include if __name__ == '__main__' blocks — the runner handles execution.
+- Assume 'solution.py' is always importable directly — never try to add it to the path.
 """
 
 # ── Sandbox execution ─────────────────────────────────────────────────────────
 
 def _run_tests_sync(generated_code: str, test_code: str) -> tuple[str, bool]:
-    """
-    Write implementation + tests to a temp directory and run via subprocess.
-    Blocking — must be called via run_in_executor to avoid blocking event loop.
-    """
     with tempfile.TemporaryDirectory() as tmpdir:
         impl_path = os.path.join(tmpdir, "solution.py")
         test_path = os.path.join(tmpdir, "test_solution.py")
 
-        # Prepend sys.path so test can import solution
+        # Normalize to forward slashes — safe on all platforms including Windows
+        safe_tmpdir = tmpdir.replace("\\", "/")
+
         full_test = (
-            f"import sys\n"
-            f"sys.path.insert(0, '{tmpdir}')\n\n"
+            "import sys\n"
+            f"sys.path.insert(0, r'{tmpdir}')\n"  # raw string handles backslashes
+            "\n"
             f"{test_code}"
         )
 
