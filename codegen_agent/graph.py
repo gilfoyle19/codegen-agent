@@ -16,13 +16,8 @@ from codegen_agent.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Conditional edge functions ────────────────────────────────────────────────
 
 def after_sanitizer(state: CodeGenState) -> str:
-    """
-    Route to END immediately if sanitization failed.
-    Otherwise proceed to planner.
-    """
     if state.get("sanitization_error"):
         logger.info(
             "Graph routing: sanitizer → END (input rejected)",
@@ -34,13 +29,7 @@ def after_sanitizer(state: CodeGenState) -> str:
 
 
 def after_critic(state: CodeGenState) -> str:
-    """
-    Route based on critic verdict and iteration count:
-    - APPROVED                        → formatter (HITL interrupt)
-    - NEEDS_REVISION + under cap      → coder (refinement loop)
-    - NEEDS_REVISION + at cap         → formatter (best effort)
-    """
-    iteration     = state.get("iteration", 1)
+    iteration      = state.get("iteration", 1)
     max_iterations = state.get("max_iterations", 3)
     review_passed  = state.get("review_passed", False)
 
@@ -64,34 +53,31 @@ def after_critic(state: CodeGenState) -> str:
     )
     return "coder"
 
-# ── Graph builder ─────────────────────────────────────────────────────────────
 
 def build_graph(
     llm,
-    checkpointer,
+    checkpointer,                  # ← always required, passed from main.py
     use_doc_retriever: bool = True,
 ) -> CompiledStateGraph:
     """
-    Build and compile the CodeGen LangGraph StateGraph.
+    Build and compile the CodeGen StateGraph.
+
+    Must be called INSIDE an async context manager so the checkpointer
+    is fully initialised before compile() is called.
 
     Args:
-        llm:               Configured ChatOpenAI (or compatible) instance.
-        checkpointer:      LangGraph checkpointer (MemorySaver, SqliteSaver, etc.)
-        use_doc_retriever: Wire in the doc retriever tool (requires chroma_db).
-                           Set False to skip doc retrieval entirely.
-
-    Returns:
-        Compiled StateGraph with HITL interrupt before formatter.
+        llm:               Configured LLM instance.
+        checkpointer:      Live checkpointer from get_runtime_checkpointer().
+        use_doc_retriever: Wire in doc retriever (requires chroma_db).
     """
     graph = StateGraph(CodeGenState)
 
-    # ── Register nodes ────────────────────────────────────────────────────────
     graph.add_node("sanitizer",     sanitizer_node)
-    graph.add_node("planner",       partial(planner_node,    llm=llm))
-    graph.add_node("coder",         partial(coder_node,      llm=llm))
-    graph.add_node("tester",        partial(tester_node,     llm=llm))
-    graph.add_node("critic",        partial(critic_node,     llm=llm))
-    graph.add_node("formatter",     partial(formatter_node,  llm=llm))
+    graph.add_node("planner",       partial(planner_node,   llm=llm))
+    graph.add_node("coder",         partial(coder_node,     llm=llm))
+    graph.add_node("tester",        partial(tester_node,    llm=llm))
+    graph.add_node("critic",        partial(critic_node,    llm=llm))
+    graph.add_node("formatter",     partial(formatter_node, llm=llm))
     graph.add_node(
         "doc_retriever",
         partial(
@@ -100,46 +86,35 @@ def build_graph(
         )
     )
 
-    # ── Entry point ───────────────────────────────────────────────────────────
     graph.set_entry_point("sanitizer")
 
-    # ── Edges ─────────────────────────────────────────────────────────────────
-
-    # Sanitizer → planner (valid) or END (rejected)
     graph.add_conditional_edges(
         "sanitizer",
         after_sanitizer,
         {"planner": "planner", END: END},
     )
-
-    # Linear pipeline: planner → doc_retriever → coder → tester → critic
     graph.add_edge("planner",       "doc_retriever")
     graph.add_edge("doc_retriever", "coder")
     graph.add_edge("coder",         "tester")
     graph.add_edge("tester",        "critic")
-
-    # Critic → formatter (approved / max iter) or coder (needs revision)
     graph.add_conditional_edges(
         "critic",
         after_critic,
         {"formatter": "formatter", "coder": "coder"},
     )
-
-    # Formatter → END (after HITL resume)
     graph.add_edge("formatter", END)
 
-    # ── Compile with HITL interrupt ───────────────────────────────────────────
     compiled = graph.compile(
-        checkpointer=checkpointer,
-        interrupt_before=["formatter"],   # mandatory human approval gate
+        checkpointer=checkpointer,       # ← baked in at compile time
+        interrupt_before=["formatter"],
     )
 
     logger.info(
         "Graph compiled",
         extra={"extra": {
-            "interrupt_before":   ["formatter"],
-            "use_doc_retriever":  use_doc_retriever,
+            "interrupt_before":  ["formatter"],
+            "use_doc_retriever": use_doc_retriever,
+            "checkpointer_type": type(checkpointer).__name__,
         }}
     )
-
     return compiled
