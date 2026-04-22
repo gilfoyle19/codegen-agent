@@ -306,6 +306,5 @@ uv run python -m codegen_agent.main "..." | jq .
 
 ---
 
-## License
 
-MIT
+
